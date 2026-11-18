@@ -1,0 +1,872 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>호떡 가게 - 손 인식 요리 게임</title>
+<link href="https://fonts.googleapis.com/css2?family=Jua&display=swap" rel="stylesheet">
+<style>
+  html,body{margin:0;height:100%;background:#2b1b12;font-family:'Jua',system-ui,sans-serif;color:#fff;overflow:hidden}
+  #wrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center}
+  canvas#game{background:#3a2418;border-radius:18px;box-shadow:0 10px 40px #0008;max-width:100vw;max-height:100vh}
+  #menu{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;background:#2b1b12ee;text-align:center;padding:20px}
+  #menu h1{font-size:64px;margin:0;color:#ffcf6b;text-shadow:0 4px 0 #8a4b14}
+  #menu p{margin:0;font-size:19px;line-height:1.6;color:#f5e3c8;max-width:760px}
+  .btns{display:flex;gap:14px;margin-top:10px;flex-wrap:wrap;justify-content:center}
+  button{font-family:inherit;font-size:24px;padding:14px 28px;border:none;border-radius:14px;cursor:pointer;background:#ffb43b;color:#4a2508;box-shadow:0 5px 0 #a8661a}
+  button:active{transform:translateY(3px);box-shadow:0 2px 0 #a8661a}
+  button.alt{background:#e8d8c0;box-shadow:0 5px 0 #9c8a70}
+  .how{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;max-width:820px;margin-top:6px}
+  .how div{background:#4a2e1e;border-radius:12px;padding:12px;font-size:16px;color:#f5e3c8}
+  .how b{display:block;font-size:34px;margin-bottom:4px}
+  #status{font-size:18px;color:#ffcf6b;min-height:24px}
+  video{display:none}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="1200" height="720"></canvas>
+  <div id="menu">
+    <h1>🥞 호떡 가게</h1>
+    <p>웹캠이 손을 인식해요. 손으로 반죽을 올리고, 꾹 눌러 펴고, 손을 뒤집어 굽는 면을 바꾸세요!<br>
+    <b>제한 시간 안에 목표 금액</b>을 채우면 다음 단계로! 총 5단계, 단계마다 붕어빵 같은 새 메뉴가 늘어나요. 엔딩은 10가지!</p>
+    <div class="how">
+      <div><b>✊</b>빈 칸에서 주먹<br>= 반죽 올리기</div>
+      <div><b>🖐️</b>반죽 위에 손바닥 올리기<br>(또는 쭉 밀기) = 눌러 펴기</div>
+      <div><b>🔄</b>손바닥 → 손등으로 뒤집기<br>= 뒤집기</div>
+      <div><b>✊</b>다 익은 것에서 주먹<br>= 손님에게 내기 / 탄 것 버리기</div>
+    </div>
+    <p style="font-size:16px;color:#c9b296">굽고 싶은 메뉴는 오른쪽 메뉴 아이콘에 손(커서)을 올려서 고르세요.<br>주문한 손님이 없는 완성품은 ✊로 <b>대기 접시</b>에 올려 두면, 주문이 들어올 때 자동으로 나가요.</p>
+    <div class="btns">
+      <button id="btnHand">🖐️ 손 인식으로 시작</button>
+      <button id="btnMouse" class="alt">🖱️ 마우스로 시작</button>
+    </div>
+    <p style="font-size:15px;color:#c9b296">마우스 모드: 클릭 = 올리기/내기, 누르고 있기 = 펴기, 우클릭 또는 스페이스 = 뒤집기, 숫자키 = 메뉴 선택</p>
+    <div id="status"></div>
+  </div>
+</div>
+<video id="cam" playsinline muted></video>
+
+<script type="module">
+const cv = document.getElementById('game');
+const ctx = cv.getContext('2d');
+const W = cv.width, H = cv.height;
+const menu = document.getElementById('menu');
+const statusEl = document.getElementById('status');
+const video = document.getElementById('cam');
+
+// ---------- 오디오 ----------
+let actx = null;
+function beep(freq, dur = 0.08, type = 'sine', vol = 0.08) {
+  try {
+    if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)();
+    const o = actx.createOscillator(), g = actx.createGain();
+    o.type = type; o.frequency.value = freq;
+    g.gain.setValueAtTime(vol, actx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.0001, actx.currentTime + dur);
+    o.connect(g); g.connect(actx.destination);
+    o.start(); o.stop(actx.currentTime + dur);
+  } catch (e) {}
+}
+
+// ---------- 메뉴 / 단계 데이터 ----------
+const ITEMS = {
+  hotteok: { name: '호떡',   e: '🥞', price: 1000, press: true,  rate: 1 / 6.5, rate0: 1 / 10, size: 0 },
+  bung:    { name: '붕어빵', e: '🐟', price: 800,  press: false, rate: 1 / 5.2, size: 36 },
+  gyeran:  { name: '계란빵', e: '🥚', price: 1300, press: false, rate: 1 / 7.5, size: 40 },
+  walnut:  { name: '호두과자', e: '🌰', price: 700, press: false, rate: 1 / 4.2, size: 36 },
+  kkwa:    { name: '꽈배기', e: '🥨', price: 1500, press: false, rate: 1 / 5.8, size: 44 },
+};
+const ALL = ['hotteok', 'bung', 'gyeran', 'walnut', 'kkwa'];
+const STAGES = [
+  { name: '동네 골목', time: 150, goal: 7000,  menu: ALL.slice(0, 1), gap: 12, patience: 62, maxCust: 3, maxItems: 2 },
+  { name: '시장 입구', time: 165, goal: 10000, menu: ALL.slice(0, 2), gap: 11, patience: 58, maxCust: 3, maxItems: 2 },
+  { name: '골목 맛집', time: 180, goal: 14000, menu: ALL.slice(0, 3), gap: 10, patience: 54, maxCust: 3, maxItems: 3 },
+  { name: '야시장',    time: 195, goal: 18000, menu: ALL.slice(0, 4), gap: 9,  patience: 50, maxCust: 4, maxItems: 3 },
+  { name: '축제 대목', time: 210, goal: 23000, menu: ALL.slice(0, 5), gap: 8,  patience: 46, maxCust: 4, maxItems: 3 },
+];
+const MAXH = 5;
+const cur = () => STAGES[stage - 1];
+const fmtTime = s => Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0');
+
+// ---------- 게임 상태 ----------
+const GRID = { x: 70, y: 300, w: 760, h: 390 };
+const slots = [];
+for (let r = 0; r < 2; r++) for (let c = 0; c < 3; c++)
+  slots.push({ x: GRID.x + 130 + c * 250, y: GRID.y + 100 + r * 190, h: null });
+
+let mode = 'menu';         // menu | calib | intro | play | over
+let inputMode = 'mouse';   // mouse | hand
+let stage = 1, selected = 'hotteok';
+let money = 0, hearts = MAXH, elapsed = 0, spawnTimer = 2;
+let bank = 0, served = 0, perfectCount = 0, burntCount = 0, angryCount = 0, leftRatios = [];
+let ending = null, endKind = '', introNote = '';
+let customers = [], floats = [], smoke = [];
+let plate = [], plateTimer = 0;               // 대기 접시: 주문이 없는 완성품이 기다리는 곳
+const PLATE = { x: 800, y: 185 }, PLATE_MAX = 4;
+let best = 0, found = [];
+try { best = +localStorage.getItem('hotteok_best') || 0; } catch (e) {}
+try { found = JSON.parse(localStorage.getItem('hotteok_endings') || '[]'); } catch (e) {}
+
+const input = { x: W / 2, y: H / 2, visible: true, pressing: false, open: false, gesture: '', pressRatio: 1 };
+const events = [];
+
+// ---------- 화면 버튼 ----------
+const BTN_Y = 615;
+let buttons = [], screenAt = 0;
+const btnReady = () => performance.now() - screenAt > 900;   // 화면 전환 직후 실수 방지
+const inRect = (b, x, y, pad = 0) => x >= b.x - pad && x <= b.x + b.w + pad && y >= b.y - pad && y <= b.y + b.h + pad;
+function setButtons(list) {
+  const n = list.length, w = 290, gap = 24, x0 = W / 2 - (n * w + (n - 1) * gap) / 2;
+  buttons = list.map((b, i) => ({ ...b, x: x0 + i * (w + gap), y: BTN_Y, w, h: 70 }));
+  screenAt = performance.now();
+}
+function pressAt(x, y, pad) {
+  if (!btnReady()) return;
+  const b = buttons.find(b => inRect(b, x, y, pad));
+  if (b) { beep(660); b.act(); }
+}
+
+// ---------- 진행 흐름 ----------
+function startRun() {
+  stage = 1; bank = 0; served = 0; perfectCount = 0; burntCount = 0; angryCount = 0; leftRatios = []; hearts = MAXH;
+  showIntro('');
+}
+function showIntro(note) {
+  introNote = note; mode = 'intro'; input.pressing = false;
+  setButtons([{ label: '▶ 시작!', act: startStage }]);
+}
+function startStage() {
+  money = 0; elapsed = 0; spawnTimer = 2;
+  customers = []; floats = []; smoke = []; plate = []; plateTimer = 0; slots.forEach(s => s.h = null);
+  selected = cur().menu[0];
+  mode = 'play';
+}
+function stageClear() {
+  bank += money; leftRatios.push(1 - elapsed / cur().time);
+  beep(880, 0.12); setTimeout(() => beep(1175, 0.12), 120); setTimeout(() => beep(1568, 0.2), 240);
+  if (stage >= STAGES.length) { finishGame('clear'); return; }
+  stage++; hearts = Math.min(MAXH, hearts + 2);
+  showIntro('🎉 ' + (stage - 1) + '단계 클리어!');
+}
+
+// ---------- 엔딩 ----------
+const ENDINGS = [
+  { id: 'early',    e: '😭', t: '첫날 폐업',        d: '손님들이 줄줄이 화내고 떠나 버렸어요. 호떡 가게의 첫날은 너무 혹독했네요... 내일은 더 잘할 수 있어요!' },
+  { id: 'closed',   e: '😡', t: '항의 폐업',        d: '한동안 잘 버텼지만 손님들의 불만이 쌓여 결국 문을 닫았어요. 동네에 "그 집은 늦다"는 소문이 퍼졌대요.' },
+  { id: 'miss',     e: '😢', t: '아쉬운 마감',      d: '목표 금액에 조금 모자랐어요. 한 번만 더 도전하면 분명 해낼 수 있어요!' },
+  { id: 'quiet',    e: '😴', t: '졸다가 마감',      d: '느긋하게 굽다가 그만 졸았나 봐요. 목표 금액에는 한참 모자랐어요.' },
+  { id: 'charcoal', e: '🔥', t: '숯불 장인',        d: '너무 많이 태웠지만... 어떤 손님이 "이 쌉쌀한 맛이 중독적"이라며 새 메뉴로 만들자고 했어요.' },
+  { id: 'legend',   e: '🎉', t: '거리의 전설',      d: '5단계를 모두 클리어! 호떡부터 꽈배기까지 못 굽는 게 없는 거리의 전설이 되었어요.' },
+  { id: 'master',   e: '🏆', t: '명인 중의 명인',   d: '모든 단계를 완벽한 맛으로 평정했어요! TV에 출연하고 가게 앞에는 오픈런 줄이 길게 늘어섰답니다.' },
+  { id: 'boom',     e: '💰', t: '대박 장사꾼',      d: '목표를 번개같이 채우는 소문난 손놀림! 2호점, 3호점 제안이 쏟아졌어요.' },
+  { id: 'artisan',  e: '👨‍🍳', t: '장인 정신',        d: '한 입 먹은 손님마다 "인생 간식"이라며 눈물을 글썽였어요. 진짜 장인의 맛이에요.' },
+  { id: 'regulars', e: '🥰', t: '단골의 정',        d: '끝까지 화난 손님이 한 명도 없었어요! 동네 사람들이 모두 단골이 되어 매일 놀러 와요.' },
+];
+function pickEnding(kind) {
+  let id;
+  if (kind === 'hearts') id = (stage === 1 && elapsed < 90) ? 'early' : 'closed';
+  else if (kind === 'time') id = burntCount >= 6 ? 'charcoal' : served < 6 ? 'quiet' : 'miss';
+  else {
+    const avgLeft = leftRatios.reduce((a, b) => a + b, 0) / Math.max(1, leftRatios.length);
+    id = perfectCount >= 25 ? 'master' : avgLeft >= 0.3 ? 'boom' : perfectCount >= 15 ? 'artisan' : angryCount === 0 ? 'regulars' : 'legend';
+  }
+  return { ...ENDINGS.find(x => x.id === id) };
+}
+function runTotal() { return bank + (endKind === 'clear' ? 0 : money); }
+function finishGame(kind) {
+  endKind = kind === 'clear' ? 'clear' : kind;
+  mode = 'over'; input.pressing = false;
+  ending = pickEnding(kind);
+  if (!found.includes(ending.id)) { found.push(ending.id); ending.isNew = true; try { localStorage.setItem('hotteok_endings', JSON.stringify(found)); } catch (e) {} }
+  const total = runTotal();
+  if (total > best) { best = total; try { localStorage.setItem('hotteok_best', best); } catch (e) {} }
+  const list = [];
+  if (kind !== 'clear') list.push({ label: '🔄 이번 단계 다시', act: () => { hearts = MAXH; showIntro(''); } });
+  list.push({ label: '🏠 처음부터', act: startRun });
+  setButtons(list);
+}
+
+// ---------- 굽는 음식 ----------
+function newItem(type) { return { type, flat: ITEMS[type].press ? 0 : 1, sides: [0, 0], down: 0, flips: 0, burnt: false, flipAnim: 0, pressFx: 0 }; }
+function sideQuality(c) {
+  if (c < 0.4) return 0;
+  if (c < 0.7) return 0.6;
+  if (c <= 1.15) return 1;
+  if (c <= 1.45) return 0.7;
+  return -1;
+}
+function canServe(h) { return !h.burnt && h.sides[0] >= 0.4 && h.sides[1] >= 0.4; }
+
+function hoverSlot(pos = input, radius = 120) {
+  if (pos === input && !input.visible) return null;
+  let best = null, bd = radius;
+  for (const s of slots) {
+    const d = Math.hypot(s.x - pos.x, s.y - pos.y);
+    if (d < bd) { bd = d; best = s; }
+  }
+  return best;
+}
+
+function addFloat(x, y, text, color = '#fff', size = 30) { floats.push({ x, y, text, color, size, t: 0 }); }
+
+function doGrab(pos) {
+  const s = hoverSlot(pos || input, 150);
+  if (!s) return;
+  if (!s.h) {
+    s.h = newItem(selected); beep(300, 0.1, 'triangle');
+    addFloat(s.x, s.y - 50, ITEMS[selected].name + ' 올림', '#f5e3c8', 22); return;
+  }
+  const h = s.h, it = ITEMS[h.type];
+  if (h.burnt) { s.h = null; beep(140, 0.2, 'sawtooth', 0.05); addFloat(s.x, s.y - 50, '버림...', '#aaa', 24); return; }
+  if (canServe(h)) {
+    const { value, perfect } = calcValue(h);
+    const target = findOrder(h.type);
+    if (target) { deliver(target, h.type, value, perfect, s.x, s.y); s.h = null; }
+    else if (plate.length < PLATE_MAX) {
+      plate.push({ type: h.type, value, perfect }); s.h = null;
+      beep(420, 0.08, 'triangle'); addFloat(s.x, s.y - 50, '대기 접시로', '#cfe8ff', 22);
+    } else addFloat(s.x, s.y - 60, '접시가 가득 찼어요', '#ffcf6b', 20);
+  }
+}
+
+const findOrder = type => customers.find(c => !c.leaving && c.orders.some(o => !o.done && o.type === type));
+function calcValue(h) {
+  const q = (sideQuality(h.sides[0]) + sideQuality(h.sides[1])) / 2;
+  const flatF = h.flat >= 0.9 ? 1 : 0.6 + 0.4 * h.flat;
+  return { value: Math.round(ITEMS[h.type].price * q * flatF / 10) * 10, perfect: q === 1 && flatF === 1 };
+}
+function deliver(target, type, value, perfect, fx, fy) {
+  target.orders.find(o => !o.done && o.type === type).done = true;
+  target.patience = Math.min(target.maxPatience, target.patience + 8);
+  const pay = value + (perfect ? 200 : 0);
+  money += pay; served++; if (perfect) perfectCount++;
+  addFloat(fx, fy - 50, perfect ? '완벽! +' + pay : '+' + pay + '원', perfect ? '#ffe066' : '#bff0a0', perfect ? 34 : 26);
+  beep(perfect ? 880 : 660, 0.12); setTimeout(() => beep(perfect ? 1320 : 880, 0.1), 80);
+  if (target.orders.every(o => o.done)) {
+    const tip = Math.round(500 * (target.patience / target.maxPatience) / 10) * 10;
+    money += tip;
+    target.leaving = 'happy';
+    addFloat(target.x, target.y - 90, '감사합니다! 팁 +' + tip, '#ffe066', 24);
+  }
+}
+
+function doFlip() {
+  const s = hoverSlot();
+  if (!s || !s.h || s.h.burnt) return;
+  const h = s.h;
+  h.down = 1 - h.down; h.flips++; h.flipAnim = 1;
+  beep(500, 0.06, 'square', 0.04);
+  const q = sideQuality(h.sides[1 - h.down]);
+  if (q === 1) addFloat(s.x, s.y - 60, '노릇노릇!', '#ffd27a', 24);
+  else if (q === 0.6 || q === 0) addFloat(s.x, s.y - 60, '아직 덜 익었어요', '#f5e3c8', 20);
+  else if (q === 0.7) addFloat(s.x, s.y - 60, '조금 탔어요', '#d79a6a', 20);
+}
+
+// ---------- 손님 ----------
+const FACES = ['🧑', '👩', '👨', '👧', '👦', '👵', '👴', '🧒', '👩‍🦱', '🧔'];
+function pickType() {
+  const m = cur().menu;
+  // 가장 최근에 열린 메뉴가 조금 더 자주 나오게
+  if (m.length > 1 && Math.random() < 0.3) return m[m.length - 1];
+  return m[Math.floor(Math.random() * m.length)];
+}
+function spawnCustomer() {
+  const S = cur();
+  if (customers.filter(c => !c.leaving).length >= S.maxCust) return;
+  const n = 1 + Math.floor(Math.random() * S.maxItems);
+  const maxP = S.patience + n * 12;
+  customers.push({
+    face: FACES[Math.floor(Math.random() * FACES.length)],
+    orders: Array.from({ length: n }, () => ({ type: pickType(), done: false })),
+    patience: maxP, maxPatience: maxP,
+    x: W + 80, y: 150, tx: 0, leaving: null, alpha: 1
+  });
+}
+
+// ---------- 업데이트 ----------
+function update(dt) {
+  for (const e of events.splice(0)) {
+    if (mode !== 'play') continue;
+    const type = typeof e === 'string' ? e : e.t;
+    if (type === 'grab') doGrab(typeof e === 'string' ? null : e);
+    if (type === 'flip') doFlip();
+  }
+  if (mode !== 'play') return;
+  const S = cur();
+  elapsed += dt;
+
+  // 메뉴 선택: 커서를 메뉴 아이콘에 올리면 선택
+  if (input.visible) S.menu.forEach((t, i) => { if (inRect(menuRect(i), input.x, input.y, inputMode === 'hand' ? 8 : 0)) selected = t; });
+
+  // 굽기
+  // 누르기 시작한 칸을 붙잡아 둔다 (누르는 동안 손이 움직여도 같은 반죽을 계속 누름)
+  if (input.pressing) { if (!pressSlot) pressSlot = hoverSlot(input, 150); } else pressSlot = null;
+  // 손 인식: 펴진 손바닥을 반죽 위에 올려 두기만 해도 눌러진다 (쭉 밀면 더 빠르게)
+  const palmSlot = (inputMode === 'hand' && input.open && !input.pressing && input.visible) ? hoverSlot(input, 100) : null;
+  for (const s of slots) {
+    const h = s.h; if (!h) continue;
+    const it = ITEMS[h.type];
+    if (h.flipAnim > 0) h.flipAnim = Math.max(0, h.flipAnim - dt * 3);
+    if (h.burnt) { if (Math.random() < dt * 8) smoke.push({ x: s.x + (Math.random() - .5) * 60, y: s.y, t: 0, dark: true }); continue; }
+    const pr = (input.pressing && pressSlot === s) ? 3.5 : palmSlot === s ? 2.2 : 0;
+    if (it.press && pr && h.flat < 1) { h.flat = Math.min(1, h.flat + dt * pr); h.pressFx = 1; if (Math.random() < dt * 10) beep(180 + Math.random() * 60, 0.03, 'triangle', 0.02); }
+    h.pressFx = Math.max(0, h.pressFx - dt * 4);
+    const rate = it.press ? (h.flat >= 0.5 ? it.rate : it.rate0) : it.rate;
+    h.sides[h.down] += dt * rate;
+    if (h.sides[h.down] > 1.15 && Math.random() < dt * 4) smoke.push({ x: s.x + (Math.random() - .5) * 70, y: s.y, t: 0 });
+    if (h.sides[h.down] > 1.45) { h.burnt = true; burntCount++; beep(120, 0.3, 'sawtooth', 0.05); addFloat(s.x, s.y - 50, '탔어요!', '#ff6b5b', 30); }
+  }
+
+  // 손님 (끊기지 않게, 너무 많지도 않게)
+  const waiting = customers.filter(c => !c.leaving).length;
+  if (waiting === 0) spawnTimer = Math.min(spawnTimer, 1.2);
+  else if (waiting === 1) spawnTimer = Math.min(spawnTimer, 6);
+  spawnTimer -= dt;
+  if (spawnTimer <= 0) { spawnCustomer(); spawnTimer = S.gap + Math.random() * 4; }
+  let idx = 0;
+  for (const c of customers) {
+    if (!c.leaving) {
+      c.tx = 120 + idx * 175; idx++;
+      c.patience -= dt;
+      if (c.patience <= 0) {
+        c.leaving = 'angry'; hearts--; angryCount++;
+        addFloat(c.x, c.y - 90, '흥! 너무 늦어요', '#ff6b5b', 24); beep(200, 0.25, 'sawtooth', 0.06);
+      }
+      c.x += (c.tx - c.x) * Math.min(1, dt * 4);
+    } else {
+      c.x -= dt * 260; c.alpha -= dt * 1.2;
+    }
+  }
+  customers = customers.filter(c => c.alpha > 0);
+
+  // 대기 접시: 주문이 들어온 메뉴는 자동으로 손님에게 나간다
+  plateTimer -= dt;
+  if (plateTimer <= 0 && plate.length) {
+    const i = plate.findIndex(p => findOrder(p.type));
+    if (i >= 0) { const p = plate.splice(i, 1)[0]; deliver(findOrder(p.type), p.type, p.value, p.perfect, PLATE.x, PLATE.y + 40); plateTimer = 0.5; }
+  }
+
+  floats.forEach(f => f.t += dt); floats = floats.filter(f => f.t < 1.3);
+  smoke.forEach(p => { p.t += dt; p.y -= dt * 40; }); smoke = smoke.filter(p => p.t < 1.4);
+
+  if (money >= S.goal) stageClear();
+  else if (hearts <= 0) finishGame('hearts');
+  else if (elapsed >= S.time) finishGame('time');
+}
+
+// ---------- 그리기 ----------
+function lerpColor(a, b, t) {
+  const pa = a.match(/\w\w/g).map(x => parseInt(x, 16)), pb = b.match(/\w\w/g).map(x => parseInt(x, 16));
+  return 'rgb(' + pa.map((v, i) => Math.round(v + (pb[i] - v) * t)).join(',') + ')';
+}
+function cookColor(c) {
+  if (c < 1) return lerpColor('f3e2bf', 'd9953a', c);
+  if (c < 1.45) return lerpColor('d9953a', '7a461a', (c - 1) / 0.45);
+  return lerpColor('7a461a', '241510', Math.min(1, (c - 1.45) / 0.3));
+}
+function roundRect(x, y, w, h, r) { ctx.beginPath(); ctx.roundRect(x, y, w, h, r); }
+
+function shapeOf(type, r) {
+  const P = new Path2D();
+  const add = fn => { const q = new Path2D(); fn(q); P.addPath(q); };
+  if (type === 'bung') {
+    const rx = r * 1.1, ry = r * 0.7;
+    add(q => q.ellipse(0, 0, rx, ry, 0, 0, Math.PI * 2));
+    add(q => { q.moveTo(-rx * 0.8, 0); q.lineTo(-rx * 1.5, -ry * 0.95); q.lineTo(-rx * 1.5, ry * 0.95); q.closePath(); });
+  } else if (type === 'gyeran') add(q => q.roundRect(-r, -r * 0.7, r * 2, r * 1.4, r * 0.45));
+  else if (type === 'walnut') add(q => q.ellipse(0, 0, r * 0.95, r * 0.8, 0, 0, Math.PI * 2));
+  else if (type === 'kkwa') {
+    add(q => q.ellipse(-r * 0.5, 0, r * 0.75, r * 0.55, 0.6, 0, Math.PI * 2));
+    add(q => q.ellipse(r * 0.5, 0, r * 0.75, r * 0.55, -0.6, 0, Math.PI * 2));
+  } else add(q => q.arc(0, 0, r, 0, Math.PI * 2));
+  return P;
+}
+
+function drawItem(s, h) {
+  const it = ITEMS[h.type];
+  const r = it.press ? 30 + 32 * h.flat : it.size;
+  const ringR = it.press ? r + 14 : 62;
+  const upCook = h.sides[1 - h.down];
+  const squash = h.flipAnim > 0 ? Math.abs(Math.cos(Math.PI * (1 - h.flipAnim))) : 1;
+  const lift = h.flipAnim > 0 ? Math.sin(Math.PI * h.flipAnim) * 40 : 0;
+  const pressSquash = 1 - h.pressFx * 0.06;
+
+  // 아래면 진행 링
+  const bc = h.sides[h.down];
+  ctx.lineWidth = 7;
+  ctx.beginPath(); ctx.arc(s.x, s.y, ringR, 0, Math.PI * 2); ctx.strokeStyle = '#0005'; ctx.stroke();
+  const frac = Math.min(1, bc / 1.45);
+  let ringCol = bc < 0.7 ? '#f5e3c8' : bc <= 1.15 ? '#6ee06e' : bc <= 1.45 ? '#ff9a3c' : '#ff4b3b';
+  if (h.burnt) ringCol = '#ff4b3b';
+  ctx.beginPath(); ctx.arc(s.x, s.y, ringR, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * frac); ctx.strokeStyle = ringCol; ctx.stroke();
+  ctx.lineWidth = 3; ctx.strokeStyle = '#6ee06e88';
+  ctx.beginPath(); ctx.arc(s.x, s.y, ringR + 8, -Math.PI / 2 + Math.PI * 2 * (0.7 / 1.45), -Math.PI / 2 + Math.PI * 2 * (1.15 / 1.45)); ctx.stroke();
+
+  const shape = shapeOf(h.type, r);
+  // 그림자
+  ctx.save(); ctx.translate(s.x, s.y + 6); ctx.scale(1, 0.95 * squash); ctx.fillStyle = '#0006'; ctx.fill(shape); ctx.restore();
+
+  ctx.save();
+  ctx.translate(s.x, s.y - lift);
+  ctx.scale(1 / pressSquash, squash * pressSquash);
+  const col = cookColor(upCook);
+  const R = r * 1.25;
+  const g = ctx.createRadialGradient(-R * 0.3, -R * 0.35, R * 0.1, 0, 0, R);
+  if (it.press && h.flat < 0.5) {
+    g.addColorStop(0, '#fffaf0'); g.addColorStop(0.6, col); g.addColorStop(1, lerpColor('c8a878', '5a3a1a', Math.min(1, upCook)));
+  } else {
+    g.addColorStop(0, lerpColor('fff3d6', 'd9953a', Math.min(1, upCook) * 0.8)); g.addColorStop(0.7, col); g.addColorStop(1, lerpColor('b88a50', '3a2010', Math.min(1, upCook / 1.45)));
+  }
+  ctx.fillStyle = g; ctx.fill(shape);
+
+  // 종류별 장식
+  if (h.type === 'hotteok' && h.flat >= 0.5 && upCook > 0.5) {
+    ctx.globalAlpha = Math.min(0.5, (upCook - 0.5)); ctx.fillStyle = '#8a4f18';
+    for (let i = 0; i < 9; i++) { const a = i * 2.4, d = r * (0.2 + (i % 3) * 0.22); ctx.beginPath(); ctx.arc(Math.cos(a) * d, Math.sin(a) * d, r * 0.09, 0, Math.PI * 2); ctx.fill(); }
+    ctx.globalAlpha = 1;
+  }
+  ctx.lineWidth = 2.5; ctx.strokeStyle = '#4a250c55';
+  if (h.type === 'bung') {
+    for (let i = 0; i < 3; i++) { ctx.beginPath(); ctx.arc(-r * 0.25 + i * r * 0.3, 0, r * 0.35, -1.0, 1.0); ctx.stroke(); }
+    ctx.fillStyle = '#2a150a'; ctx.beginPath(); ctx.arc(r * 0.65, -r * 0.15, r * 0.07, 0, Math.PI * 2); ctx.fill();
+  } else if (h.type === 'gyeran') {
+    ctx.fillStyle = '#fff7e0'; ctx.beginPath(); ctx.ellipse(0, -r * 0.05, r * 0.42, r * 0.32, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#ffc93c'; ctx.beginPath(); ctx.arc(0, -r * 0.05, r * 0.2, 0, Math.PI * 2); ctx.fill();
+  } else if (h.type === 'walnut') {
+    ctx.beginPath(); ctx.moveTo(0, -r * 0.75); ctx.quadraticCurveTo(r * 0.3, 0, 0, r * 0.75); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(-r * 0.5, -r * 0.45); ctx.quadraticCurveTo(-r * 0.2, 0, -r * 0.5, r * 0.45); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(r * 0.5, -r * 0.45); ctx.quadraticCurveTo(r * 0.75, 0, r * 0.5, r * 0.45); ctx.stroke();
+  } else if (h.type === 'kkwa') {
+    ctx.fillStyle = '#ffffffaa';
+    for (let i = 0; i < 10; i++) { const a = i * 1.9; ctx.beginPath(); ctx.arc(Math.cos(a) * r * 0.8 * ((i % 3) / 3 + 0.3), Math.sin(a) * r * 0.35, 2.5, 0, Math.PI * 2); ctx.fill(); }
+  }
+  if (h.burnt) {
+    const bg = ctx.createRadialGradient(0, 0, R * 0.3, 0, 0, R);
+    bg.addColorStop(0, '#2a150a55'); bg.addColorStop(1, '#1a0d06ee');
+    ctx.fillStyle = bg; ctx.fill(shape);
+  }
+  // 기름 하이라이트
+  ctx.fillStyle = '#ffffff40';
+  ctx.beginPath(); ctx.ellipse(-r * 0.3, -r * 0.35, r * 0.28, r * 0.14, -0.5, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+
+  const ly = s.y + (it.press ? r : 56) + 46;
+  ctx.textAlign = 'center';
+  if (h.burnt) { ctx.font = '26px Jua'; ctx.fillStyle = '#ff6b5b'; ctx.fillText('✊로 버리기', s.x, ly); }
+  else if (canServe(h)) { ctx.font = '22px Jua'; ctx.fillStyle = '#bff0a0'; ctx.fillText(findOrder(h.type) ? '✊ 손님에게!' : '✊ 대기 접시로', s.x, ly); }
+  else if (it.press && h.flat < 1) { ctx.font = '20px Jua'; ctx.fillStyle = '#f5e3c8'; ctx.fillText('🖐️ 꾹 눌러 펴기 ' + Math.round(h.flat * 100) + '%', s.x, ly); }
+}
+
+function drawGriddle() {
+  roundRect(GRID.x, GRID.y, GRID.w, GRID.h, 26);
+  const g = ctx.createLinearGradient(0, GRID.y, 0, GRID.y + GRID.h);
+  g.addColorStop(0, '#4b4f55'); g.addColorStop(1, '#2a2c30');
+  ctx.fillStyle = g; ctx.fill();
+  ctx.lineWidth = 10; ctx.strokeStyle = '#1b1c1f'; ctx.stroke();
+  ctx.fillStyle = '#ffffff0c';
+  ctx.beginPath(); ctx.ellipse(GRID.x + 250, GRID.y + 90, 220, 50, -0.15, 0, Math.PI * 2); ctx.fill();
+
+  const hs = mode === 'play' ? hoverSlot() : null;
+  for (const s of slots) {
+    ctx.beginPath(); ctx.arc(s.x, s.y, 72, 0, Math.PI * 2);
+    ctx.fillStyle = s === hs ? '#ffffff14' : '#00000022'; ctx.fill();
+    if (s === hs) { ctx.lineWidth = 3; ctx.setLineDash([8, 8]); ctx.strokeStyle = '#ffcf6b'; ctx.stroke(); ctx.setLineDash([]); }
+    if (s.h) drawItem(s, s.h);
+    else if (s === hs) { ctx.font = '19px Jua'; ctx.textAlign = 'center'; ctx.fillStyle = '#ffcf6b'; ctx.fillText('✊ ' + ITEMS[selected].name, s.x, s.y + 7); }
+  }
+  for (const p of smoke) {
+    ctx.globalAlpha = Math.max(0, 0.45 * (1 - p.t / 1.4));
+    ctx.fillStyle = p.dark ? '#333' : '#ddd';
+    ctx.beginPath(); ctx.arc(p.x, p.y, 10 + p.t * 18, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawCustomers() {
+  ctx.fillStyle = '#5a3624'; ctx.fillRect(0, 0, W, 270);
+  ctx.fillStyle = '#7b4a30'; ctx.fillRect(0, 235, W, 35);
+  for (let i = 0; i < W; i += 80) { ctx.fillStyle = (i / 80) % 2 ? '#c0392b' : '#f4eadc'; ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i + 80, 0); ctx.lineTo(i + 80, 30); ctx.quadraticCurveTo(i + 40, 55, i, 30); ctx.fill(); }
+
+  for (const c of customers) {
+    ctx.globalAlpha = Math.max(0, c.alpha);
+    const p = c.patience / c.maxPatience;
+    ctx.font = '84px serif'; ctx.textAlign = 'center';
+    ctx.fillText(c.face, c.x, c.y + 70);
+    const mood = c.leaving === 'happy' ? '😋' : c.leaving === 'angry' ? '😡' : p > 0.6 ? '🙂' : p > 0.3 ? '😐' : '😠';
+    ctx.font = '34px serif'; ctx.fillText(mood, c.x + 46, c.y + 4);
+    if (!c.leaving) {
+      const n = c.orders.length, bw = Math.max(100, n * 42 + 24);
+      roundRect(c.x - bw / 2, c.y - 105, bw, 62, 14); ctx.fillStyle = '#fff8ec'; ctx.fill();
+      ctx.beginPath(); ctx.moveTo(c.x - 10, c.y - 44); ctx.lineTo(c.x + 4, c.y - 30); ctx.lineTo(c.x + 12, c.y - 44); ctx.fill();
+      c.orders.forEach((o, i) => {
+        const ix = c.x - (n - 1) * 21 + i * 42;
+        ctx.globalAlpha = Math.max(0, c.alpha) * (o.done ? 0.35 : 1);
+        ctx.font = '30px serif'; ctx.fillStyle = '#000'; ctx.fillText(ITEMS[o.type].e, ix, c.y - 65);
+        ctx.globalAlpha = Math.max(0, c.alpha);
+        if (o.done) { ctx.fillStyle = '#2e9e3e'; ctx.font = '28px Jua'; ctx.fillText('✓', ix, c.y - 62); }
+      });
+      roundRect(c.x - 60, c.y + 92, 120, 12, 6); ctx.fillStyle = '#0006'; ctx.fill();
+      roundRect(c.x - 60, c.y + 92, 120 * Math.max(0, p), 12, 6);
+      ctx.fillStyle = p > 0.6 ? '#6ee06e' : p > 0.3 ? '#ffcf3b' : '#ff5b4b'; ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawPlate() {
+  const { x, y } = PLATE;
+  ctx.fillStyle = '#0005'; ctx.beginPath(); ctx.ellipse(x, y + 10, 88, 58, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#e6e0d4'; ctx.beginPath(); ctx.ellipse(x, y, 86, 56, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#f8f4ea'; ctx.beginPath(); ctx.ellipse(x, y, 68, 42, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.textAlign = 'center';
+  plate.forEach((p, i) => {
+    ctx.font = '34px serif'; ctx.fillStyle = '#000';
+    ctx.fillText(ITEMS[p.type].e, x + (i % 2 ? 26 : -26), y + (i < 2 ? -4 : 28));
+  });
+  ctx.font = '17px Jua'; ctx.fillStyle = '#ffe9b0';
+  ctx.fillText('🍽️ 대기 접시 ' + plate.length + '/' + PLATE_MAX, x, y - 68);
+}
+
+const menuRect = i => ({ x: 870 + i * 62, y: 482, w: 56, h: 60 });
+
+function drawHUD() {
+  const S = cur();
+  ctx.textAlign = 'left';
+  ctx.font = '22px Jua'; ctx.fillStyle = '#ffcf6b';
+  ctx.fillText('⭐ ' + stage + '단계 · ' + S.name, 870, 298);
+  ctx.font = '30px Jua'; ctx.fillStyle = '#ffe9b0';
+  ctx.fillText('💰 ' + money.toLocaleString() + '원', 870, 336);
+  ctx.fillText('❤️'.repeat(Math.max(0, hearts)) + '🤍'.repeat(MAXH - Math.max(0, hearts)), 870, 378);
+  ctx.font = '22px Jua'; ctx.fillStyle = '#f5e3c8';
+  const left = Math.max(0, Math.ceil(S.time - elapsed));
+  ctx.fillStyle = left <= 15 ? '#ff8a7a' : '#f5e3c8';
+  ctx.fillText('⏱ 남은 시간 ' + fmtTime(left), 870, 412);
+  ctx.fillStyle = '#f5e3c8';
+  ctx.fillText('🎯 목표 ' + S.goal.toLocaleString() + '원', 870, 444);
+  const pct = Math.min(1, money / S.goal);
+  roundRect(1040, 428, 150, 14, 7); ctx.fillStyle = '#0006'; ctx.fill();
+  roundRect(1040, 428, Math.max(0.01, 150 * pct), 14, 7); ctx.fillStyle = pct >= 1 ? '#ffe066' : '#6ee06e'; ctx.fill();
+
+  // 메뉴 선택 아이콘
+  ctx.font = '15px Jua'; ctx.fillStyle = '#c9b296';
+  ctx.fillText(inputMode === 'hand' ? '메뉴 (손을 올려 선택)' : '메뉴 (클릭 / 숫자키)', 870, 472);
+  S.menu.forEach((t, i) => {
+    const r = menuRect(i), sel = t === selected;
+    roundRect(r.x, r.y, r.w, r.h, 12); ctx.fillStyle = sel ? '#ffcf6b' : '#4a2e1e'; ctx.fill();
+    if (sel) { ctx.lineWidth = 3; ctx.strokeStyle = '#fff'; ctx.stroke(); }
+    ctx.textAlign = 'center'; ctx.font = '32px serif'; ctx.fillStyle = '#000'; ctx.fillText(ITEMS[t].e, r.x + r.w / 2, r.y + 40);
+    ctx.font = '14px Jua'; ctx.fillStyle = sel ? '#fff' : '#c9b296'; ctx.fillText(ITEMS[t].name, r.x + r.w / 2, r.y + r.h + 16);
+    ctx.textAlign = 'left';
+  });
+
+  ctx.font = '16px Jua'; ctx.fillStyle = '#c9b296';
+  const tips = inputMode === 'hand'
+    ? ['✊ 빈 칸: 올리기 / 익으면: 내기', '🖐️ 반죽 위에 손바닥: 펴기(호떡)', '🔄 손바닥→손등: 뒤집기']
+    : ['클릭: 올리기 / 익으면 내기', '누르고 있기: 펴기(호떡)', '우클릭·스페이스: 뒤집기'];
+  tips.forEach((t, i) => ctx.fillText(t, 870, 600 + i * 26));
+}
+
+let lastLandmarks = null;
+function drawCamPreview() {
+  if (inputMode !== 'hand') return;
+  const pw = 300, ph = 225, px = W - pw - 16, py = 16;
+  ctx.save();
+  roundRect(px, py, pw, ph, 14); ctx.clip();
+  ctx.fillStyle = '#000'; ctx.fillRect(px, py, pw, ph);
+  if (video.readyState >= 2) {
+    ctx.translate(px + pw, py); ctx.scale(-1, 1);
+    ctx.drawImage(video, 0, 0, pw, ph);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+  }
+  if (lastLandmarks) {
+    ctx.fillStyle = '#ffcf6b';
+    for (const p of lastLandmarks) { ctx.beginPath(); ctx.arc(px + (1 - p.x) * pw, py + p.y * ph, 3, 0, Math.PI * 2); ctx.fill(); }
+  }
+  ctx.restore();
+  ctx.lineWidth = 3; roundRect(px, py, pw, ph, 14); ctx.strokeStyle = '#ffcf6b'; ctx.stroke();
+  ctx.font = '20px Jua'; ctx.textAlign = 'left';
+  roundRect(px + 8, py + ph - 38, pw - 16, 30, 8); ctx.fillStyle = '#000a'; ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.fillText(input.visible ? input.gesture : '손이 안 보여요', px + 16, py + ph - 16);
+  if (input.visible) {
+    const t = Math.max(0, Math.min(1, (input.pressRatio - 1) / (PRESS_TH - 1)));
+    roundRect(px + pw - 110, py + ph - 30, 90, 14, 7); ctx.fillStyle = '#fff3'; ctx.fill();
+    roundRect(px + pw - 110, py + ph - 30, 90 * t, 14, 7); ctx.fillStyle = input.pressing ? '#6ee06e' : '#ffcf6b'; ctx.fill();
+  }
+}
+
+function drawCursor() {
+  if (!input.visible || mode === 'menu' || mode === 'calib') return;
+  ctx.textAlign = 'center';
+  if (inputMode === 'hand') {
+    ctx.beginPath(); ctx.arc(input.x, input.y, input.pressing ? 34 : 26, 0, Math.PI * 2);
+    ctx.fillStyle = input.pressing ? '#6ee06e55' : '#ffffff33'; ctx.fill();
+    ctx.lineWidth = 3; ctx.strokeStyle = input.pressing ? '#6ee06e' : '#fff'; ctx.stroke();
+    ctx.font = '38px serif'; ctx.fillStyle = '#000';
+    ctx.fillText(gState.fist ? '✊' : gState.facing ? '🖐️' : '🤚', input.x, input.y + 13);
+  }
+}
+
+function drawFloats() {
+  ctx.textAlign = 'center';
+  for (const f of floats) {
+    ctx.globalAlpha = Math.max(0, 1 - f.t / 1.3);
+    ctx.font = f.size + 'px Jua'; ctx.lineWidth = 5; ctx.strokeStyle = '#2b1b12';
+    ctx.strokeText(f.text, f.x, f.y - f.t * 50); ctx.fillStyle = f.color; ctx.fillText(f.text, f.x, f.y - f.t * 50);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawButtons() {
+  for (const b of buttons) {
+    const hov = btnReady() && input.visible && inRect(b, input.x, input.y, inputMode === 'hand' ? 30 : 0);
+    roundRect(b.x, b.y + (hov ? 3 : 0), b.w, b.h, 16);
+    ctx.fillStyle = !btnReady() ? '#8a7a60' : hov ? '#ffd36b' : '#ffb43b'; ctx.fill();
+    ctx.fillStyle = '#4a2508'; ctx.font = '28px Jua'; ctx.textAlign = 'center';
+    ctx.fillText(b.label, b.x + b.w / 2, b.y + 45);
+  }
+  if (inputMode === 'hand') { ctx.font = '18px Jua'; ctx.fillStyle = '#c9b296'; ctx.textAlign = 'center'; ctx.fillText('손을 버튼 위에 두고 ✊ 주먹을 쥐세요', W / 2, BTN_Y + 98); }
+}
+
+function drawOverlay() {
+  if (mode === 'calib') {
+    ctx.fillStyle = '#000b'; ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = 'center'; ctx.fillStyle = '#ffcf6b'; ctx.font = '44px Jua';
+    ctx.fillText('손바닥을 카메라에 보여주세요 🖐️', W / 2 - 150, H / 2 - 30);
+    ctx.font = '24px Jua'; ctx.fillStyle = '#f5e3c8';
+    ctx.fillText('손가락을 쫙 펴고, 편하게 1초 동안 가만히 있어 주세요', W / 2 - 150, H / 2 + 15);
+    roundRect(W / 2 - 350, H / 2 + 50, 400, 22, 11); ctx.fillStyle = '#fff3'; ctx.fill();
+    roundRect(W / 2 - 350, H / 2 + 50, 400 * Math.min(1, calib.progress), 22, 11); ctx.fillStyle = '#6ee06e'; ctx.fill();
+  }
+  if (mode === 'intro') {
+    const S = cur();
+    ctx.fillStyle = '#000d'; ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = 'center';
+    if (introNote) { ctx.fillStyle = '#ffe066'; ctx.font = '42px Jua'; ctx.fillText(introNote, W / 2, 95); }
+    ctx.fillStyle = '#ffcf6b'; ctx.font = '58px Jua';
+    ctx.fillText(stage + '단계 · ' + S.name, W / 2, 175);
+    ctx.fillStyle = '#fff'; ctx.font = '36px Jua';
+    ctx.fillText('🎯 목표 금액 ' + S.goal.toLocaleString() + '원', W / 2, 250);
+    ctx.fillStyle = '#f5e3c8'; ctx.font = '28px Jua';
+    ctx.fillText('⏱ 제한 시간 ' + fmtTime(S.time) + ' · ❤️ ' + hearts + '개', W / 2, 296);
+    ctx.fillStyle = '#c9b296'; ctx.font = '24px Jua';
+    ctx.fillText('오늘의 메뉴', W / 2, 360);
+    const prev = stage > 1 ? STAGES[stage - 2].menu : [];
+    const bw = 150, x0 = W / 2 - (S.menu.length * bw) / 2;
+    S.menu.forEach((t, i) => {
+      const cx = x0 + i * bw + bw / 2, isNew = !prev.includes(t) && stage > 1;
+      roundRect(cx - 62, 380, 124, 160, 16); ctx.fillStyle = isNew ? '#6b4318' : '#3d281b'; ctx.fill();
+      if (isNew) { ctx.lineWidth = 3; ctx.strokeStyle = '#ffe066'; ctx.stroke(); }
+      ctx.font = '58px serif'; ctx.fillStyle = '#000'; ctx.fillText(ITEMS[t].e, cx, 455);
+      ctx.font = '24px Jua'; ctx.fillStyle = '#fff'; ctx.fillText(ITEMS[t].name, cx, 495);
+      ctx.font = '18px Jua'; ctx.fillStyle = '#c9b296'; ctx.fillText(ITEMS[t].price.toLocaleString() + '원', cx, 522);
+      if (isNew) { ctx.font = '20px Jua'; ctx.fillStyle = '#ffe066'; ctx.fillText('✨NEW', cx, 400); }
+    });
+    drawButtons();
+  }
+  if (mode === 'over') {
+    const E = ending;
+    ctx.fillStyle = '#000d'; ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = 'center';
+    ctx.font = '90px serif'; ctx.fillStyle = '#000'; ctx.fillText(E.e, W / 2, 150);
+    ctx.fillStyle = '#ffcf6b'; ctx.font = '56px Jua';
+    ctx.fillText(E.t + (E.isNew ? '  ✨NEW' : ''), W / 2, 235);
+    ctx.font = '26px Jua'; ctx.fillStyle = '#f5e3c8';
+    let line = '', y = 295;
+    for (const ch of E.d) {
+      if (ctx.measureText(line + ch).width > 820) { ctx.fillText(line, W / 2, y); y += 38; line = ch.trim() ? ch : ''; } else line += ch;
+    }
+    ctx.fillText(line, W / 2, y);
+    ctx.font = '34px Jua'; ctx.fillStyle = '#fff';
+    ctx.fillText(endKind === 'clear' ? '총 번 돈: ' + runTotal().toLocaleString() + '원'
+      : stage + '단계: ' + money.toLocaleString() + ' / ' + cur().goal.toLocaleString() + '원', W / 2, y + 66);
+    ctx.font = '22px Jua'; ctx.fillStyle = '#f5e3c8';
+    ctx.fillText('판매 ' + served + '개 · 완벽 ' + perfectCount + '개 · 태운 것 ' + burntCount + '개 · 최고 기록 ' + best.toLocaleString() + '원', W / 2, y + 104);
+    ctx.fillStyle = '#ffcf6b';
+    ctx.fillText('🎬 발견한 엔딩 ' + found.length + ' / ' + ENDINGS.length, W / 2, y + 140);
+    drawButtons();
+  }
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#3a2418'; ctx.fillRect(0, 0, W, H);
+  drawCustomers();
+  if (mode === 'play' || mode === 'intro' || mode === 'over') drawPlate();
+  drawGriddle();
+  if (mode === 'play' || mode === 'intro' || mode === 'over') drawHUD();
+  drawCamPreview();
+  drawFloats();
+  drawOverlay();
+  drawCursor();
+}
+
+// ---------- 손 인식 ----------
+const MP_VER = '0.10.14';
+const MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
+let landmarker = null;
+const PRESS_TH = 1.10;    // 기준 크기 대비 이만큼 커지면 '누르기'
+let keyPress = false;     // 손 인식이 불안할 때 쓰는 보조키 (Z 누르고 있기)
+let pressSlot = null;
+const gState = { facing: true, fist: false, rawFacing: true, facingCount: 0, rawFist: false, fistCount: 0, baseline: 0 };
+const calib = { progress: 0, signSum: 0, scaleSum: 0, n: 0, palmSign: 1 };
+let lastVideoTime = -1;
+const posHist = [];
+
+async function startHand() {
+  statusEl.textContent = '카메라 켜는 중...';
+  const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480, facingMode: 'user' }, audio: false });
+  video.srcObject = stream; await video.play();
+  statusEl.textContent = '손 인식 AI 모델 불러오는 중... (처음엔 몇 초 걸려요)';
+  const vision = await import(`https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MP_VER}`);
+  const fileset = await vision.FilesetResolver.forVisionTasks(`https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MP_VER}/wasm`);
+  const opts = (delegate) => ({ baseOptions: { modelAssetPath: MODEL_URL, delegate }, runningMode: 'VIDEO', numHands: 1,
+    minHandDetectionConfidence: 0.4, minHandPresenceConfidence: 0.4, minTrackingConfidence: 0.4 });
+  try { landmarker = await vision.HandLandmarker.createFromOptions(fileset, opts('GPU')); }
+  catch (e) { landmarker = await vision.HandLandmarker.createFromOptions(fileset, opts('CPU')); }
+}
+
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+function analyzeHand(lm, handed) {
+  const w = lm[0];
+  // 손가락 둘째 마디의 굽은 각도(뿌리-마디-끝): 펴면 약 170°, 주먹이면 약 60~100°. 손 방향·거리와 상관없이 안정적
+  const angle = (a, b, c) => {
+    const u = { x: a.x - b.x, y: a.y - b.y, z: (a.z - b.z) }, v = { x: c.x - b.x, y: c.y - b.y, z: (c.z - b.z) };
+    const d = (u.x * v.x + u.y * v.y + u.z * v.z) / ((Math.hypot(u.x, u.y, u.z) * Math.hypot(v.x, v.y, v.z)) || 1);
+    return Math.acos(Math.max(-1, Math.min(1, d))) * 180 / Math.PI;
+  };
+  let ext = 0, curled = 0;
+  for (const [mcp, pip, tip] of [[5, 6, 8], [9, 10, 12], [13, 14, 16], [17, 18, 20]]) {
+    const ag = angle(lm[mcp], lm[pip], lm[tip]);
+    if (ag > 145) ext++;
+    if (ag < 112) curled++;
+  }
+  const v1 = { x: lm[5].x - w.x, y: lm[5].y - w.y }, v2 = { x: lm[17].x - w.x, y: lm[17].y - w.y };
+  const cz = v1.x * v2.y - v1.y * v2.x;
+  const sign = Math.sign(cz) * (handed === 'Right' ? 1 : -1);
+  const scale = dist(lm[0], lm[9]) + dist(lm[5], lm[17]);
+  const ids = [0, 5, 9, 13, 17];
+  const cx = ids.reduce((s, i) => s + lm[i].x, 0) / 5, cy = ids.reduce((s, i) => s + lm[i].y, 0) / 5;
+  return { ext, curled, sign, scale, cx, cy, cz };
+}
+
+function processHand() {
+  if (!landmarker || video.readyState < 2) return;
+  if (video.currentTime === lastVideoTime) return;
+  lastVideoTime = video.currentTime;
+  const res = landmarker.detectForVideo(video, performance.now());
+  if (!res.landmarks || !res.landmarks.length) { input.visible = false; input.open = false; lastLandmarks = null; input.pressing = false; return; }
+  const lm = res.landmarks[0];
+  const handed = res.handedness?.[0]?.[0]?.categoryName || 'Right';
+  lastLandmarks = lm;
+  const a = analyzeHand(lm, handed);
+
+  if (mode === 'calib') {
+    if (a.ext >= 4 && Math.abs(a.cz) > 0.002) {
+      calib.signSum += a.sign; calib.scaleSum += a.scale; calib.n++;
+      calib.progress = calib.n / 30;
+      if (calib.n >= 30) {
+        calib.palmSign = calib.signSum >= 0 ? 1 : -1;
+        gState.baseline = calib.scaleSum / calib.n;
+        beep(880, 0.1); setTimeout(() => beep(1175, 0.15), 100);
+        startRun();
+      }
+    }
+    input.visible = true; input.gesture = '보정 중...';
+    return;
+  }
+
+  const nx = ((1 - a.cx) - 0.12) / 0.76, ny = (a.cy - 0.12) / 0.7;
+  const tx = Math.max(0, Math.min(1, nx)) * W, ty = Math.max(0, Math.min(1, ny)) * H;
+  const k = 0.6;
+  input.open = a.ext >= 3;
+  input.x += (tx - input.x) * k; input.y += (ty - input.y) * k;
+  input.visible = true;
+  const nowT = performance.now();
+  posHist.push({ t: nowT, x: input.x, y: input.y });
+  while (posHist.length > 1 && nowT - posHist[0].t > 1000) posHist.shift();
+
+  const rawFacing = a.sign * calib.palmSign > 0;
+  if (rawFacing === gState.rawFacing) gState.facingCount++; else { gState.rawFacing = rawFacing; gState.facingCount = 1; }
+  if (gState.facingCount >= 3 && gState.facing !== rawFacing && a.ext >= 3) {
+    if (gState.facing && !rawFacing) events.push('flip');
+    gState.facing = rawFacing;
+  }
+  const rawFist = a.curled >= 3;
+  if (rawFist === gState.rawFist) gState.fistCount++; else { gState.rawFist = rawFist; gState.fistCount = 1; }
+  if (gState.fistCount >= 2 && gState.fist !== rawFist) {
+    if (rawFist) {
+      // 주먹 쥐는 동안 손이 움직이므로 0.3초 전 위치를 기준으로 칸/버튼을 고른다
+      const past = posHist.find(p => nowT - p.t <= 300) || posHist[0];
+      if (mode === 'over' || mode === 'intro') pressAt(past.x, past.y, 30);
+      else events.push({ t: 'grab', x: past.x, y: past.y });
+    }
+    gState.fist = rawFist;
+  }
+  const ratio = a.scale / (gState.baseline || a.scale);
+  input.pressRatio = ratio;
+  // 손바닥/손등 판별이 흔들려도 눌러지도록, 손이 펴져 있기만 하면 누르기로 본다
+  const openHand = a.ext >= 3;
+  const on = input.pressing ? ratio > 1.05 : ratio > PRESS_TH;   // 한 번 눌리면 조금 덜 밀어도 유지
+  input.pressing = mode === 'play' && ((openHand && on) || keyPress);
+  if (openHand && ratio < 1.06) gState.baseline = gState.baseline * 0.97 + a.scale * 0.03;   // 가만히 있을 땐 기준을 빠르게 맞춤
+
+  input.gesture = (input.pressing ? '🖐️ 누르는 중!' : gState.fist ? '✊ 주먹' : gState.facing ? '🖐️ 손바닥' : '🤚 손등') + ` (펴짐${a.ext} 접힘${a.curled})`;
+}
+
+// ---------- 마우스 / 키보드 ----------
+function toCanvas(e) {
+  const r = cv.getBoundingClientRect();
+  return { x: (e.clientX - r.left) * W / r.width, y: (e.clientY - r.top) * H / r.height };
+}
+cv.addEventListener('mousemove', e => { if (inputMode !== 'mouse') return; const p = toCanvas(e); input.x = p.x; input.y = p.y; input.visible = true; });
+cv.addEventListener('mousedown', e => {
+  const p = toCanvas(e);
+  if (mode === 'over' || mode === 'intro') { pressAt(p.x, p.y, 0); return; }
+  if (inputMode !== 'mouse' || mode !== 'play') return;
+  if (e.button === 2) { events.push('flip'); return; }
+  const mi = cur().menu.findIndex((t, i) => inRect(menuRect(i), p.x, p.y));
+  if (mi >= 0) { selected = cur().menu[mi]; return; }
+  events.push('grab'); input.pressing = true;
+});
+window.addEventListener('mouseup', () => { if (inputMode === 'mouse') input.pressing = false; });
+cv.addEventListener('contextmenu', e => e.preventDefault());
+window.addEventListener('keydown', e => {
+  if (e.code === 'Space' || e.key === 'f' || e.key === 'F') { e.preventDefault(); events.push('flip'); }
+  if (e.key === 'z' || e.key === 'Z') { keyPress = true; input.pressing = true; }
+  const n = parseInt(e.key);
+  if (mode === 'play' && n >= 1 && n <= cur().menu.length) selected = cur().menu[n - 1];
+});
+
+window.addEventListener('keyup', e => { if (e.key === 'z' || e.key === 'Z') { keyPress = false; if (inputMode === 'mouse') input.pressing = false; } });
+
+// ---------- 시작 ----------
+document.getElementById('btnMouse').onclick = () => {
+  beep(660); inputMode = 'mouse'; menu.style.display = 'none'; startRun();
+};
+document.getElementById('btnHand').onclick = async () => {
+  beep(660);
+  try {
+    await startHand();
+    inputMode = 'hand'; menu.style.display = 'none';
+    calib.progress = 0; calib.signSum = 0; calib.scaleSum = 0; calib.n = 0;
+    mode = 'calib';
+  } catch (err) {
+    console.error(err);
+    statusEl.textContent = '카메라나 AI 모델을 불러오지 못했어요: ' + (err.message || err) + ' — 카메라 권한과 인터넷 연결을 확인해 주세요.';
+  }
+};
+
+let last = performance.now();
+function loop(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  if (inputMode === 'hand') processHand();
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
